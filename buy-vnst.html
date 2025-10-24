@@ -368,6 +368,7 @@
     let currentAccount = null;
     let minBuyAmount = 0;
     let vnstDecimals = 18;
+    let contractsInitialized = false;
 
     document.addEventListener('DOMContentLoaded', function() {
       if(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
@@ -380,8 +381,6 @@
     async function initSwap() {
       await setupEventListeners();
       await checkWalletConnection();
-      await initContracts();
-      setupInputListener();
       updateUI();
     }
 
@@ -406,7 +405,7 @@
     function setupInputListener() {
       const vnstAmountInput = document.getElementById('vnstAmount');
       vnstAmountInput.addEventListener('input', async () => {
-        if (currentAccount) {
+        if (currentAccount && contractsInitialized) {
           await calculateQuote();
         }
       });
@@ -459,7 +458,10 @@
           if (accounts.length > 0) {
             currentAccount = accounts[0];
             setupWalletEvents();
-            updateWalletInfo();
+            
+            // Initialize contracts only when wallet is connected
+            await initContracts();
+            await updateWalletInfo();
           }
         } catch (error) {
           console.error("Error checking wallet connection:", error);
@@ -470,12 +472,13 @@
     function setupWalletEvents() {
       const provider = window.ethereum || window.BinanceChain;
       if (provider) {
-        provider.on('accountsChanged', (accounts) => {
+        provider.on('accountsChanged', async (accounts) => {
           currentAccount = accounts.length > 0 ? accounts[0] : null;
           updateUI();
           if (currentAccount) {
-            updateWalletInfo();
-            calculateQuote();
+            await initContracts();
+            await updateWalletInfo();
+            await calculateQuote();
           }
         });
         
@@ -487,6 +490,8 @@
 
     async function updateWalletInfo() {
       try {
+        if (!usdtToken || !currentAccount) return;
+        
         const usdtDecimals = await usdtToken.methods.decimals().call();
         const balance = await usdtToken.methods.balanceOf(currentAccount).call();
         
@@ -514,11 +519,12 @@
         web3 = new Web3(provider);
         
         await initContracts();
+        await updateWalletInfo();
         
-        updateWalletInfo();
         showMessage('Wallet connected successfully', 'success');
         updateUI();
-        await calculateQuote();
+        setupInputListener();
+        
       } catch (error) {
         if (error.code === 4001) {
           showMessage('User rejected connection request', 'error');
@@ -536,224 +542,182 @@
           web3 = new Web3(window.ethereum || window.BinanceChain || config.rpcUrl);
         }
         
-        // ✅ CORRECTED SWAP CONTRACT ABI
+        // ✅ SIMPLIFIED AND CORRECT SWAP CONTRACT ABI
         const swapABI = [
+          // Core Functions
           {
-            "inputs": [
-              {"internalType": "address","name": "_vnstToken","type": "address"},
-              {"internalType": "address","name": "_usdtToken","type": "address"},
-              {"internalType": "address","name": "_sellerWallet","type": "address"},
-              {"internalType": "address","name": "_rewardWallet","type": "address"},
-              {"internalType": "address","name": "_buyVntWallet","type": "address"},
-              {"internalType": "address","name": "_apyRewardWallet","type": "address"},
-              {"internalType": "address","name": "_receiverWallet","type": "address"}
-            ],
-            "stateMutability": "nonpayable",
-            "type": "constructor"
-          },
-          {
-            "anonymous": false,
-            "inputs": [
-              {"indexed": false, "internalType": "uint256", "name": "index", "type": "uint256"},
-              {"indexed": false, "internalType": "address", "name": "wallet", "type": "address"},
-              {"indexed": false, "internalType": "uint16", "name": "percentage", "type": "uint16"}
-            ],
-            "name": "DistributionUpdated",
-            "type": "event"
-          },
-          {
-            "anonymous": false,
-            "inputs": [
-              {"indexed": false, "internalType": "uint256", "name": "newMinBuy", "type": "uint256"}
-            ],
-            "name": "MinBuyUpdated",
-            "type": "event"
-          },
-          {
-            "anonymous": false,
-            "inputs": [
-              {"indexed": true, "internalType": "address", "name": "previousOwner", "type": "address"},
-              {"indexed": true, "internalType": "address", "name": "newOwner", "type": "address"}
-            ],
-            "name": "OwnershipTransferred",
-            "type": "event"
-          },
-          {
-            "anonymous": false,
-            "inputs": [
-              {"indexed": false, "internalType": "uint256", "name": "newPrice", "type": "uint256"}
-            ],
-            "name": "PriceUpdated",
-            "type": "event"
-          },
-          {
-            "anonymous": false,
-            "inputs": [],
-            "name": "SwapPaused",
-            "type": "event"
-          },
-          {
-            "anonymous": false,
-            "inputs": [],
-            "name": "SwapResumed",
-            "type": "event"
-          },
-          {
-            "anonymous": false,
-            "inputs": [
-              {"indexed": true, "internalType": "address", "name": "buyer", "type": "address"},
-              {"indexed": false, "internalType": "uint256", "name": "usdtAmount", "type": "uint256"},
-              {"indexed": false, "internalType": "uint256", "name": "vnstAmount", "type": "uint256"},
-              {"indexed": false, "internalType": "uint256", "name": "rateUsed", "type": "uint256"}
-            ],
-            "name": "TokensPurchased",
-            "type": "event"
-          },
-          {
-            "anonymous": false,
-            "inputs": [
-              {"indexed": true, "internalType": "address", "name": "from", "type": "address"},
-              {"indexed": true, "internalType": "address", "name": "toWallet", "type": "address"},
-              {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"},
-              {"indexed": false, "internalType": "uint16", "name": "percentage", "type": "uint16"}
-            ],
-            "name": "USDTDistributed",
-            "type": "event"
-          },
-          {
-            "inputs": [{"internalType": "uint256", "name": "vnstAmount", "type": "uint256"}],
+            "inputs": [{"internalType": "uint256","name": "vnstAmount","type": "uint256"}],
             "name": "buyVNST",
             "outputs": [],
             "stateMutability": "nonpayable",
             "type": "function"
           },
           {
-            "inputs": [{"internalType": "uint256", "name": "vnstAmount", "type": "uint256"}],
+            "inputs": [{"internalType": "uint256","name": "vnstAmount","type": "uint256"}],
             "name": "getQuote",
-            "outputs": [{"internalType": "uint256", "name": "usdtRequired", "type": "uint256"}],
+            "outputs": [{"internalType": "uint256","name": "usdtRequired","type": "uint256"}],
             "stateMutability": "view",
             "type": "function"
           },
           {
             "inputs": [],
             "name": "getPricePerVNST",
-            "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+            "outputs": [{"internalType": "uint256","name": "","type": "uint256"}],
             "stateMutability": "view",
             "type": "function"
           },
+          // View Functions
           {
             "inputs": [],
             "name": "minBuy",
-            "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+            "outputs": [{"internalType": "uint256","name": "","type": "uint256"}],
             "stateMutability": "view",
             "type": "function"
           },
           {
             "inputs": [],
             "name": "vnstPrice",
-            "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+            "outputs": [{"internalType": "uint256","name": "","type": "uint256"}],
             "stateMutability": "view",
             "type": "function"
           },
           {
             "inputs": [],
             "name": "sellerWallet",
-            "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+            "outputs": [{"internalType": "address","name": "","type": "address"}],
             "stateMutability": "view",
             "type": "function"
           },
           {
             "inputs": [],
             "name": "vnstToken",
-            "outputs": [{"internalType": "contract IERC20", "name": "", "type": "address"}],
+            "outputs": [{"internalType": "contract IERC20","name": "","type": "address"}],
             "stateMutability": "view",
             "type": "function"
           },
           {
             "inputs": [],
             "name": "usdtToken",
-            "outputs": [{"internalType": "contract IERC20", "name": "", "type": "address"}],
+            "outputs": [{"internalType": "contract IERC20","name": "","type": "address"}],
             "stateMutability": "view",
             "type": "function"
           },
           {
-            "inputs": [{"internalType": "address", "name": "buyer", "type": "address"}],
+            "inputs": [{"internalType": "address","name": "buyer","type": "address"}],
             "name": "isApproved",
-            "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
-            "stateMutability": "view",
-            "type": "function"
-          },
-          {
-            "inputs": [],
-            "name": "isSellerApproved",
-            "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+            "outputs": [{"internalType": "bool","name": "","type": "bool"}],
             "stateMutability": "view",
             "type": "function"
           },
           {
             "inputs": [],
             "name": "totalSold",
-            "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+            "outputs": [{"internalType": "uint256","name": "","type": "uint256"}],
             "stateMutability": "view",
             "type": "function"
-          },
-          {
-            "inputs": [{"internalType": "uint8", "name": "index", "type": "uint8"}],
-            "name": "distributionWallets",
-            "outputs": [
-              {"internalType": "address", "name": "wallet", "type": "address"},
-              {"internalType": "uint16", "name": "percentage", "type": "uint16"}
-            ],
-            "stateMutability": "view",
-            "type": "function"
-          },
-          {
-            "stateMutability": "payable",
-            "type": "fallback"
-          },
-          {
-            "stateMutability": "payable",
-            "type": "receive"
           }
         ];
 
-        // Token ABI (same as before)
+        // ✅ STANDARD ERC20 ABI
         const tokenABI = [
-          {"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"payable":false,"stateMutability":"view","type":"function"},
-          {"constant":true,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"payable":false,"stateMutability":"view","type":"function"},
-          {"constant":true,"inputs":[],"name":"name","outputs":[{"name":"","type":"string"}],"payable":false,"stateMutability":"view","type":"function"},
-          {"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},
-          {"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},
-          {"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},
-          {"constant":false,"inputs":[{"name":"_from","type":"address"},{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transferFrom","outputs":[{"name":"success","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"}
+          {
+            "constant": true,
+            "inputs": [],
+            "name": "decimals",
+            "outputs": [{"name": "","type": "uint8"}],
+            "type": "function"
+          },
+          {
+            "constant": true,
+            "inputs": [],
+            "name": "symbol",
+            "outputs": [{"name": "","type": "string"}],
+            "type": "function"
+          },
+          {
+            "constant": true,
+            "inputs": [],
+            "name": "name",
+            "outputs": [{"name": "","type": "string"}],
+            "type": "function"
+          },
+          {
+            "constant": true,
+            "inputs": [{"name": "_owner","type": "address"}],
+            "name": "balanceOf",
+            "outputs": [{"name": "balance","type": "uint256"}],
+            "type": "function"
+          },
+          {
+            "constant": false,
+            "inputs": [
+              {"name": "_spender","type": "address"},
+              {"name": "_value","type": "uint256"}
+            ],
+            "name": "approve",
+            "outputs": [{"name": "success","type": "bool"}],
+            "type": "function"
+          },
+          {
+            "constant": true,
+            "inputs": [
+              {"name": "_owner","type": "address"},
+              {"name": "_spender","type": "address"}
+            ],
+            "name": "allowance",
+            "outputs": [{"name": "remaining","type": "uint256"}],
+            "type": "function"
+          },
+          {
+            "constant": false,
+            "inputs": [
+              {"name": "_from","type": "address"},
+              {"name": "_to","type": "address"},
+              {"name": "_value","type": "uint256"}
+            ],
+            "name": "transferFrom",
+            "outputs": [{"name": "success","type": "bool"}],
+            "type": "function"
+          }
         ];
 
+        // Initialize contracts
         swapContract = new web3.eth.Contract(swapABI, config.vnstSwapAddress);
         vnstToken = new web3.eth.Contract(tokenABI, config.vnstTokenAddress);
         usdtToken = new web3.eth.Contract(tokenABI, config.usdtTokenAddress);
         
+        // Test contract connection
         minBuyAmount = await swapContract.methods.minBuy().call();
         vnstDecimals = await vnstToken.methods.decimals().call();
         
         document.getElementById('minBuyAmount').textContent = formatUnits(minBuyAmount, vnstDecimals) + ' VNST';
         
         await loadContractData();
+        contractsInitialized = true;
+        
+        showMessage('Contracts initialized successfully', 'success');
+        
       } catch (error) {
         console.error('Contract initialization error:', error);
         showMessage(`Error initializing contracts: ${error.message}`, 'error');
+        contractsInitialized = false;
       }
     }
 
     async function loadContractData() {
       try {
-        const price = await swapContract.methods.getPricePerVNST().call();
+        if (!swapContract) return;
+        
+        const price = await swapContract.methods.vnstPrice().call();
         document.getElementById('vnstPrice').textContent = `${formatUnits(price, 18)} USDT`;
         
         const sellerWallet = await swapContract.methods.sellerWallet().call();
         const availableVNST = await vnstToken.methods.balanceOf(sellerWallet).call();
         document.getElementById('availableVNST').textContent = `${formatUnits(availableVNST, vnstDecimals)} VNST`;
         
-        document.getElementById('vnstContract').textContent = await swapContract.methods.vnstToken().call();
+        const vnstTokenAddress = await swapContract.methods.vnstToken().call();
+        document.getElementById('vnstContract').textContent = vnstTokenAddress;
+        
       } catch (error) {
         console.error('Error loading contract data:', error);
         showMessage(`Error loading contract data: ${error.message}`, 'error');
@@ -781,6 +745,11 @@
 
     async function approveUSDT() {
       try {
+        if (!contractsInitialized) {
+          showMessage('Contracts not initialized. Please reconnect wallet.', 'error');
+          return;
+        }
+
         const vnstAmountInput = document.getElementById('vnstAmount').value;
         if (!vnstAmountInput || isNaN(vnstAmountInput)) {
           showMessage('Please enter a valid VNST amount', 'error');
@@ -818,6 +787,11 @@
 
     async function buyVNST() {
       try {
+        if (!contractsInitialized) {
+          showMessage('Contracts not initialized. Please reconnect wallet.', 'error');
+          return;
+        }
+
         const vnstAmountInput = document.getElementById('vnstAmount').value;
         if (!vnstAmountInput || isNaN(vnstAmountInput)) {
           showMessage('Please enter a valid VNST amount', 'error');
@@ -887,19 +861,19 @@
       if (isConnected) {
         connectBtn.textContent = 'Connected';
         connectBtn.disabled = true;
-        document.getElementById('walletInfo').classList.remove('swap-hidden');
       } else {
         connectBtn.textContent = 'Connect Wallet';
         connectBtn.disabled = false;
         document.getElementById('walletInfo').classList.add('swap-hidden');
       }
       
-      document.getElementById('approveBtn').disabled = !isConnected;
+      document.getElementById('approveBtn').disabled = !isConnected || !contractsInitialized;
       document.getElementById('buyBtn').disabled = true;
     }
 
     function formatUnits(value, decimals) {
-      const num = value / 10 ** decimals;
+      if (!value) return "0";
+      const num = parseFloat(value) / 10 ** decimals;
       return num.toLocaleString(undefined, {
         minimumFractionDigits: 2,
         maximumFractionDigits: decimals
@@ -915,31 +889,38 @@
       const messageElement = document.createElement('div');
       messageElement.textContent = message;
       messageElement.classList.add(`swap-${type}-message`);
+      statusDiv.innerHTML = ''; // Clear previous messages
       statusDiv.appendChild(messageElement);
       
       setTimeout(() => {
         messageElement.style.opacity = '0';
-        setTimeout(() => messageElement.remove(), 300);
+        setTimeout(() => {
+          if (messageElement.parentNode) {
+            messageElement.remove();
+          }
+        }, 300);
       }, 5000);
     }
 
     function parseError(error) {
       if (!error) return 'Unknown error';
       
-      if (error.message.includes('insufficient funds')) {
-        return 'Insufficient BNB balance for gas fee';
-      }
-      if (error.message.includes('user rejected')) {
-        return 'User rejected the transaction';
-      }
-      if (error.message.includes('execution reverted')) {
-        return 'Transaction reverted by contract';
-      }
-      if (error.message.includes('eth_sendTransaction')) {
-        return 'Wallet connection issue. Please refresh and try again';
+      if (error.message) {
+        if (error.message.includes('insufficient funds')) {
+          return 'Insufficient BNB balance for gas fee';
+        }
+        if (error.message.includes('user rejected')) {
+          return 'User rejected the transaction';
+        }
+        if (error.message.includes('execution reverted')) {
+          // Extract revert reason if available
+          const revertMatch = error.message.match(/reverted with reason string '(.+)'/);
+          return revertMatch ? `Transaction failed: ${revertMatch[1]}` : 'Transaction reverted by contract';
+        }
+        return error.message;
       }
       
-      return error.message || 'Unknown error occurred';
+      return 'Unknown error occurred';
     }
   </script>
 </body>
