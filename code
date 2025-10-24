@@ -1,0 +1,281 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.20;
+
+interface IERC20 {
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+    function transfer(address to, uint256 value) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function decimals() external view returns (uint8);
+}
+
+library SafeMathManual {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+        return c;
+    }
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        require(b <= a, "SafeMath: subtraction overflow");
+        return a - b;
+    }
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) return 0;
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+        return c;
+    }
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        require(b > 0, "SafeMath: division by zero");
+        return a / b;
+    }
+}
+
+contract VNSTSwap {
+    using SafeMathManual for uint256;
+
+    address public owner;
+    address public sellerWallet;
+
+    IERC20 public immutable vnstToken;
+    IERC20 public immutable usdtToken;
+
+    uint8 public constant vnstDecimals = 18;
+    uint8 public constant usdtDecimals = 18;
+
+    uint8 private constant PRICE_DECIMALS = 18;
+
+    uint256 public vnstPrice = 9 * 10**16;
+
+    uint256 public minBuy = 100 * 10**18;
+
+    uint256 public totalSold;
+
+    bool public isPaused;
+    bool private _reentrancyLock;
+
+    struct DistributionWallet {
+        address wallet;
+        uint16 percentage; 
+    }
+
+    DistributionWallet[4] public distributionWallets;
+    uint16 public constant PERCENTAGE_BASE = 10000;
+
+    mapping(address => uint256) public totalPurchased; 
+
+    event TokensPurchased(address indexed buyer, uint256 usdtAmount, uint256 vnstAmount, uint256 rateUsed);
+    event SwapPaused();
+    event SwapResumed();
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event PriceUpdated(uint256 newPrice);
+    event MinBuyUpdated(uint256 newMinBuy);
+    event DistributionUpdated(uint256 index, address wallet, uint16 percentage);
+    event USDTDistributed(address indexed from, address indexed toWallet, uint256 amount, uint16 percentage);
+    event SellerUpdated(address indexed previousSeller, address indexed newSeller);
+    event DistributionPercentagesUpdated(uint16[4] percentages);
+    event RescueERC20(address indexed token, address indexed to, uint256 amount);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Caller is not owner");
+        _;
+    }
+
+    modifier notPaused() {
+        require(!isPaused, "Swap is paused");
+        _;
+    }
+
+    modifier nonReentrant() {
+        require(!_reentrancyLock, "Reentrant call detected");
+        _reentrancyLock = true;
+        _;
+        _reentrancyLock = false;
+    }
+
+    constructor(
+        address _vnstToken,
+        address _usdtToken,
+        address _sellerWallet,
+        address _rewardWallet,
+        address _buyVntWallet,
+        address _apyRewardWallet,
+        address _receiverWallet
+    ) {
+        require(_vnstToken != address(0), "VNST token zero");
+        require(_usdtToken != address(0), "USDT token zero");
+        require(_sellerWallet != address(0), "Seller wallet zero");
+        require(_rewardWallet != address(0) && _buyVntWallet != address(0) && _apyRewardWallet != address(0) && _receiverWallet != address(0), "Distribution wallet zero");
+
+        owner = msg.sender;
+        sellerWallet = _sellerWallet;
+
+        vnstToken = IERC20(_vnstToken);
+        usdtToken = IERC20(_usdtToken);
+
+        distributionWallets[0] = DistributionWallet(_rewardWallet, 400);   
+        distributionWallets[1] = DistributionWallet(_buyVntWallet, 1600);  
+        distributionWallets[2] = DistributionWallet(_apyRewardWallet, 300); 
+        distributionWallets[3] = DistributionWallet(_receiverWallet, 7700); 
+
+        require(_getTotalPercentage() == PERCENTAGE_BASE, "Invalid distribution percentages");
+    }
+
+    function buyVNST(uint256 vnstAmount) external notPaused nonReentrant {
+        require(vnstAmount > 0, "vnstAmount zero");
+
+        require(vnstAmount >= minBuy, "Minimum purchase not met");
+
+        uint256 sellerBalance = vnstToken.balanceOf(sellerWallet);
+        require(sellerBalance >= vnstAmount, "Seller has insufficient VNST");
+
+        uint256 usdtRequired = _calculateUsdtRequired(vnstAmount);
+        require(usdtRequired > 0, "USDT required zero");
+
+        require(usdtToken.allowance(msg.sender, address(this)) >= usdtRequired, "Insufficient USDT allowance");
+        require(vnstToken.allowance(sellerWallet, address(this)) >= vnstAmount, "Seller VNST allowance too low");
+
+        _distributeUSDT(msg.sender, usdtRequired);
+
+        _safeTransferFrom(vnstToken, sellerWallet, msg.sender, vnstAmount);
+
+        totalPurchased[msg.sender] = totalPurchased[msg.sender].add(vnstAmount);
+        totalSold = totalSold.add(vnstAmount);
+
+        emit TokensPurchased(msg.sender, usdtRequired, vnstAmount, vnstPrice);
+    }
+
+    function getQuote(uint256 vnstAmount) external view returns (uint256 usdtRequired) {
+        require(vnstAmount >= minBuy, "Amount below minimum purchase limit");
+        usdtRequired = _calculateUsdtRequired(vnstAmount);
+    }
+
+    function isApproved(address buyer) external view returns (bool) {
+        uint256 usdtRequired = _calculateUsdtRequired(minBuy);
+        return usdtToken.allowance(buyer, address(this)) >= usdtRequired;
+    }
+
+    function isSellerApproved() external view returns (bool) {
+        return vnstToken.allowance(sellerWallet, address(this)) >= minBuy;
+    }
+
+    function pauseSwap() external onlyOwner {
+        require(!isPaused, "Already paused");
+        isPaused = true;
+        emit SwapPaused();
+    }
+
+    function resumeSwap() external onlyOwner {
+        require(isPaused, "Not paused");
+        isPaused = false;
+        emit SwapResumed();
+    }
+
+    function updatePrice(uint256 newPrice) external onlyOwner {
+        require(newPrice > 0, "Price zero");
+        vnstPrice = newPrice;
+        emit PriceUpdated(newPrice);
+    }
+
+    function updateMinBuy(uint256 newMinBuy) external onlyOwner {
+        require(newMinBuy > 0, "Min buy zero");
+        minBuy = newMinBuy;
+        emit MinBuyUpdated(newMinBuy);
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "New owner zero");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+
+    function updateSellerWallet(address newSeller) external onlyOwner {
+        require(newSeller != address(0), "Seller zero");
+        emit SellerUpdated(sellerWallet, newSeller);
+        sellerWallet = newSeller;
+    }
+
+    function updateDistributionWallet(uint8 index, address newWallet) external onlyOwner {
+        require(index < 4, "Invalid index");
+        require(newWallet != address(0), "Wallet zero");
+        distributionWallets[index].wallet = newWallet;
+        emit DistributionUpdated(index, newWallet, distributionWallets[index].percentage);
+    }
+
+    function updateDistributionPercentages(uint16[4] calldata newPercentages) external onlyOwner {
+        uint16 total;
+        for (uint256 i = 0; i < 4; ) {
+            total = total + newPercentages[i];
+            unchecked { ++i; }
+        }
+        require(total == PERCENTAGE_BASE, "Percentages must sum to 10000");
+
+        for (uint256 j = 0; j < 4; ) {
+            distributionWallets[j].percentage = newPercentages[j];
+            emit DistributionUpdated(j, distributionWallets[j].wallet, newPercentages[j]);
+            unchecked { ++j; }
+        }
+        emit DistributionPercentagesUpdated(newPercentages);
+    }
+
+    function rescueERC20(address token, uint256 amount, address to) external onlyOwner {
+        require(to != address(0), "Recipient zero");
+        require(token != address(0), "Token zero");
+        _safeTransfer(IERC20(token), to, amount);
+        emit RescueERC20(token, to, amount);
+    }
+
+    function _calculateUsdtRequired(uint256 vnstAmount18) internal view returns (uint256) {
+        return (vnstAmount18.mul(vnstPrice)) / (10**PRICE_DECIMALS);
+    }
+
+    function _distributeUSDT(address from, uint256 totalAmount) internal {
+        uint256 remaining = totalAmount;
+
+        for (uint256 i = 0; i < 3; ) {
+            DistributionWallet memory dw = distributionWallets[i];
+            uint256 amt = (totalAmount * dw.percentage) / PERCENTAGE_BASE;
+            _safeTransferFrom(usdtToken, from, dw.wallet, amt);
+            remaining = remaining.sub(amt);
+            emit USDTDistributed(from, dw.wallet, amt, dw.percentage);
+            unchecked { ++i; }
+        }
+
+        DistributionWallet memory last = distributionWallets[3];
+        _safeTransferFrom(usdtToken, from, last.wallet, remaining);
+        emit USDTDistributed(from, last.wallet, remaining, last.percentage);
+    }
+
+    function _getTotalPercentage() internal view returns (uint16 total) {
+        for (uint256 i = 0; i < 4; ) {
+            total = total + distributionWallets[i].percentage;
+            unchecked { ++i; }
+        }
+    }
+
+    function _safeTransferFrom(IERC20 token, address from, address to, uint256 value) internal {
+        bytes memory data = abi.encodeWithSelector(token.transferFrom.selector, from, to, value);
+        (bool success, bytes memory returndata) = address(token).call(data);
+        require(success, "SafeERC20: transferFrom reverted");
+        if (returndata.length != 0) {
+            require(abi.decode(returndata, (bool)), "SafeERC20: transferFrom false");
+        }
+    }
+
+    function _safeTransfer(IERC20 token, address to, uint256 value) internal {
+        bytes memory data = abi.encodeWithSelector(token.transfer.selector, to, value);
+        (bool success, bytes memory returndata) = address(token).call(data);
+        require(success, "SafeERC20: transfer reverted");
+        if (returndata.length != 0) {
+            require(abi.decode(returndata, (bool)), "SafeERC20: transfer false");
+        }
+    }
+
+    receive() external payable {
+        revert("Contract does not accept native token");
+    }
+
+    fallback() external payable {
+        revert("Invalid function call");
+    }
+}
